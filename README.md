@@ -1,18 +1,6 @@
-# Semgrep Reporter
+# Semgrep Reporting Tool
 
 A powerful Python utility that transforms Semgrep security findings into customizable, visually appealing PDF and CSV reports. Streamline your security reporting workflow by connecting directly to the Semgrep API to generate professional, presentation-ready security documentation for both SAST (Static Application Security Testing) and SCA (Software Composition Analysis) findings.
-
-## Features
-
-- 🔍 Direct integration with Semgrep API
-- 📊 Beautiful visualization charts
-- 📑 Multiple output formats (PDF, CSV, Excel)
-- 🎨 Customizable report appearance
-- 🏷️ Filtering by repositories, tags, and severity levels
-- 🎯 Company logo integration
-- 📈 Summary statistics and trends
-- 🔐 Separate reports for SAST and SCA findings
-- 📦 Detailed dependency vulnerability information
 
 ## Installation
 
