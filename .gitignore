@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.env
+.venv
+.python-version
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+test_pdf.py
+
+# Semgrep Reporter specific
+reports/
+**/reports/
+**/sast/
+**/sca/
+semgrep_raw_findings.json
+semgrep_findings.csv
+semgrep_findings.xlsx
+semgrep_report.pdf
+severity_chart.png
+
+# Poetry
+poetry.lock
+
+# Logs
+*.log
+logs/ 

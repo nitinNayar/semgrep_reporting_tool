@@ -1,0 +1,37 @@
+[tool.poetry]
+name = "semgrep-reporter"
+version = "0.1.0"
+description = "A tool for generating customizable security reports from Semgrep findings"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "semgrep_reporter"}]
+
+[tool.poetry.dependencies]
+python = "^3.9"  # Updated from ^3.8 to ^3.9 to support matplotlib
+requests = "^2.31.0"
+pydantic = "^2.6.3"
+pydantic-settings = "^2.0.3"
+pandas = "^2.2.1"
+matplotlib = "^3.8.3"
+seaborn = "^0.13.2"
+plotly = "^5.19.0"
+kaleido = "0.2.1"  # Added for Plotly image export
+fpdf2 = "^2.7.8"
+openpyxl = "^3.1.2"
+jinja2 = "^3.1.3"
+click = "^8.1.7"
+rich = "^13.7.1"
+fpdf = "^1.7.2"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+black = "^24.2.0"
+isort = "^5.13.2"
+mypy = "^1.8.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+semgrep-reporter = "semgrep_reporter.cli:main" 
