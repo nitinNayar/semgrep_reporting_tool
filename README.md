@@ -26,7 +26,7 @@ pip install semgrep-reporter
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/semgrep-reporter.git
+git clone https://github.com/nitinNayar/semgrep_reporting_tool.git
 cd semgrep-reporter
 
 # Install dependencies
