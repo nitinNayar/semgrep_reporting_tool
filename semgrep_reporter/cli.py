@@ -10,23 +10,48 @@ from typing import List, Optional
 import click
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.progress import Progress
+from rich.progress import Progress, BarColumn, TimeRemainingColumn, SpinnerColumn, TextColumn, TaskProgressColumn, track
 
 from . import __version__
 from .api import SemgrepClient
 from .config import APIConfig, FilterConfig, ReportConfig, Settings
 from .reports import ReportGenerator
 
-# Set up logging
+# Create console for output
+console = Console()
+
+# Set up logging based on debug flag
+class RichConsoleHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            level = record.levelname
+            
+            # Force a new line before each log message
+            console.print()
+            
+            if level == 'DEBUG':
+                console.print(f"[dim]{msg}[/dim]")
+            elif level == 'INFO':
+                console.print(msg)
+            elif level == 'WARNING':
+                console.print(f"[yellow]{msg}[/yellow]")
+            elif level == 'ERROR':
+                console.print(f"[red]{msg}[/red]")
+            elif level == 'CRITICAL':
+                console.print(f"[red bold]{msg}[/red bold]")
+        except Exception:
+            self.handleError(record)
+
+# Configure root logger
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
     datefmt="[%X]",
-    handlers=[RichHandler(rich_tracebacks=True)]
+    handlers=[RichConsoleHandler()]
 )
-logger = logging.getLogger("semgrep_reporter")
 
-console = Console()
+logger = logging.getLogger("semgrep_reporter")
 
 
 @click.group()
@@ -107,114 +132,133 @@ def common_options(function):
 
 
 def generate_report(
-    finding_type: str,
-    api_token: str,
-    deployment_slug: str,
-    output_dir: Path,
-    output_formats: List[str],
-    repositories: Optional[List[str]],
-    tags: Optional[List[str]],
-    severity_levels: Optional[List[str]],
-    include_charts: bool,
-    company_logo: Optional[Path],
-    report_title: str,
-    debug: bool,
-    api_url: str,
-):
-    """Common function to generate reports for both SAST and SCA findings."""
+    issue_type: str = "sast",
+    repositories: Optional[List[str]] = None,
+    tags: Optional[List[str]] = None,
+    severity_levels: Optional[List[str]] = None,
+    output_formats: Optional[List[str]] = None,
+    output_dir: str = "reports",
+    config_file: Optional[str] = None,
+    api_token: Optional[str] = None,
+    deployment_slug: Optional[str] = None,
+    api_url: Optional[str] = None,
+    include_charts: bool = True,
+    company_logo: Optional[Path] = None,
+    report_title: Optional[str] = None,
+    debug: bool = False,
+) -> None:
+    """
+    Generate reports for Semgrep findings.
     
-    # Set logging level based on debug flag
-    if debug:
-        logger.setLevel(logging.DEBUG)
-        logger.debug("Debug mode enabled")
-    
-    try:
-        # Create configuration
-        logger.debug(f"Setting up with deployment_slug: {deployment_slug}")
-        logger.debug(f"API URL: {api_url}")
+    Args:
+        issue_type: Type of findings to fetch ("sast" or "sca")
+        repositories: Optional list of repository names to filter by
+        tags: Optional list of repository tags to filter by
+        severity_levels: Optional list of severity levels to filter by
+        output_formats: Optional list of report formats to generate
+        output_dir: Directory to store generated reports
+        config_file: Path to configuration file
+        api_token: Semgrep API token
+        deployment_slug: Semgrep deployment slug
+        api_url: Semgrep API base URL
+        include_charts: Whether to include charts in reports
+        company_logo: Path to company logo for reports
+        report_title: Custom title for the report
+        debug: Enable debug mode
+    """
+    # Set up logging based on debug flag
+    log_level = logging.DEBUG if debug else logging.INFO
+    logger.setLevel(log_level)
+
+    # Create progress display with refresh_per_second=1 to reduce flicker
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=False,
+        refresh_per_second=1,
+        expand=True
+    ) as progress:
+        # Create overall task
+        overall_task = progress.add_task("[cyan]Processing findings...", total=100)
+        progress.update(overall_task, completed=10)
         
-        settings = Settings(
-            api=APIConfig(
-                api_token=api_token,
-                deployment_slug=deployment_slug,
-                api_url=api_url
-            ),
-            report=ReportConfig(
-                output_formats=list(output_formats),
-                include_charts=include_charts,
-                company_logo=company_logo,
-                report_title=report_title,
-            ),
-            filters=FilterConfig(
-                repositories=list(repositories) if repositories else None,
-                tags=list(tags) if tags else None,
-                severity_levels=list(severity_levels) if severity_levels else None,
-            ),
-            output_dir=output_dir,
+        # Create API config
+        api_config = APIConfig(
+            token=api_token,
+            deployment_slug=deployment_slug,
+            api_url=api_url
         )
-
-        # Initialize components
-        client = SemgrepClient(settings.api)
         
-        with Progress() as progress:
-            # Create a progress task for findings fetching
-            fetch_task = progress.add_task(f"Fetching {finding_type.upper()} findings...", total=None)
+        # Initialize Semgrep client
+        client = SemgrepClient(api_config)
+        
+        # Create task for fetching findings
+        fetch_task = progress.add_task("[yellow]Fetching findings...", total=100)
+        
+        def update_fetch_progress(current: int, total: int):
+            if total > 0:
+                progress.update(fetch_task, completed=(current / total) * 100)
+                # Update overall progress (10-50%)
+                overall_progress = 10 + (current / total) * 40
+                progress.update(overall_task, completed=overall_progress)
+        
+        # Fetch findings with progress callback
+        findings = client.get_findings(
+            issue_type=issue_type,
+            repositories=repositories,
+            tags=tags,
+            severity_levels=severity_levels,
+            progress_callback=update_fetch_progress,
+            console=console
+        )
+        
+        # Complete fetch task
+        progress.update(fetch_task, completed=100)
+        progress.update(overall_task, completed=50)
+        
+        # Create reports task
+        if not output_formats:
+            output_formats = ["pdf", "xlsx"]
             
-            # Fetch findings with specific type
-            logger.debug(f"Calling Semgrep API to fetch {finding_type} findings...")
-            findings = client.get_findings(
-                repositories=settings.filters.repositories,
-                tags=settings.filters.tags,
-                severity_levels=settings.filters.severity_levels,
-                finding_types=[finding_type],
-                progress=progress,
-                progress_task=fetch_task
-            )
+        reports_task = progress.add_task("[green]Generating reports...", total=len(output_formats))
+        
+        # Create report config
+        report_config = ReportConfig(
+            output_formats=output_formats,
+            include_charts=include_charts,
+            company_logo=company_logo,
+            report_title=report_title or f"Semgrep {issue_type.upper()} Findings Report",
+            deployment_slug=deployment_slug
+        )
+        
+        # Initialize report generator
+        generator = ReportGenerator(report_config, Path(output_dir))
+        
+        # Generate all reports at once
+        generator.generate_reports(findings)
+        
+        # Update progress for each format
+        for i, report_format in enumerate(output_formats, 1):
+            progress.update(reports_task, description=f"[green]Generated {report_format} report...")
+            progress.update(reports_task, advance=1)
+            # Update overall progress (50-100%)
+            overall_progress = 50 + (i / len(output_formats)) * 50
+            progress.update(overall_task, completed=overall_progress)
             
-            if not findings:
-                console.print(f"[yellow]Warning: No {finding_type.upper()} findings were returned from the Semgrep API.[/yellow]")
-                console.print("This could be because:")
-                console.print("  • There are no security issues in the repositories")
-                console.print("  • The API token doesn't have access to the specified deployment")
-                console.print("  • The deployment slug is incorrect")
-                console.print("  • The filters you specified returned no results")
-                
-                if click.confirm("Do you want to continue and generate empty reports?", default=False):
-                    console.print("[yellow]Continuing with empty reports...[/yellow]")
-                else:
-                    console.print("[yellow]Aborting.[/yellow]")
-                    sys.exit(0)
-
-            # Generate reports
-            progress.update(fetch_task, description="Generating reports...")
-            
-            # Update report title based on finding type
-            settings.report.report_title = f"Semgrep {finding_type.upper()} Findings Report"
-            
-            # Create output directory with finding type
-            type_output_dir = output_dir / finding_type
-            type_output_dir.mkdir(parents=True, exist_ok=True)
-            
-            generator = ReportGenerator(settings.report, type_output_dir)
-            generator.generate_reports(findings)
-            progress.update(fetch_task, completed=100)
-
-        console.print(f"\n[green]Successfully generated {finding_type.upper()} reports in {type_output_dir}[/green]")
-        console.print("\nGenerated files:")
+        # Complete all tasks
+        progress.update(overall_task, completed=100)
+        
+        # Show completion message
+        console.print("\n[bold green]Successfully generated reports in:[/bold green]")
         for format_type in output_formats:
             if format_type == "pdf":
-                console.print(f"  • {type_output_dir}/semgrep_report.pdf")
-            elif format_type == "csv":
-                console.print(f"  • {type_output_dir}/semgrep_findings.csv")
+                console.print(f"  • {output_dir}/semgrep_report.pdf")
             elif format_type == "xlsx":
-                console.print(f"  • {type_output_dir}/semgrep_findings.xlsx")
-
-    except Exception as e:
-        logger.exception("Error occurred during report generation")
-        console.print(f"\n[red]Error: {str(e)}[/red]")
-        if debug:
-            console.print_exception()
-        raise click.Abort()
+                console.print(f"  • {output_dir}/semgrep_findings.xlsx")
 
 
 @cli.command()

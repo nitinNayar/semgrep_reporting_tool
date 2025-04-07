@@ -13,6 +13,7 @@ import pandas as pd
 import plotly.express as px
 from fpdf import FPDF
 from jinja2 import Environment, PackageLoader, select_autoescape
+from openpyxl.utils import get_column_letter
 
 from .api import Finding
 from .config import ReportConfig
@@ -94,8 +95,23 @@ class ReportGenerator:
             "commit": finding.commit,
             "scan_date": finding.scan_date,
             "line_of_code_url": finding.line_of_code_url,
+        }
+
+        # Add Semgrep UI link if raw_response is available
+        if hasattr(finding, 'raw_response') and isinstance(finding.raw_response, dict):
+            finding_id = finding.raw_response.get('id')
+            finding_dict.update({
+                "finding_id": finding_id,
+                "semgrep_ui_url": f"https://semgrep.dev/orgs/{self.config.deployment_slug}/findings/{finding_id}" if finding_id else None
+            })
+        else:
+            finding_dict.update({
+                "finding_id": None,
+                "semgrep_ui_url": None
+            })
             
-            # SCA-specific fields
+        # Add SCA-specific fields
+        finding_dict.update({
             "is_dependency": getattr(finding, 'is_dependency', False),
             "dependency_name": getattr(finding, 'dependency_name', None),
             "dependency_version": getattr(finding, 'dependency_version', None),
@@ -112,7 +128,7 @@ class ReportGenerator:
             "vulnerability_classes": [],
             "cwe_names": [],
             "owasp_names": []
-        }
+        })
         
         # Add rule information if available
         if finding.rule:
@@ -143,6 +159,67 @@ class ReportGenerator:
                 finding_dict["component_risk"] = finding.assistant.component.risk
                 
         return finding_dict
+
+    def _add_severity_summary_table(self, pdf: FPDF, findings: List[Finding], font_family: str) -> None:
+        """Add a table showing severity counts per repository."""
+        # Group findings by repository and count severities
+        repo_severity_counts = {}
+        for finding in findings:
+            repo = finding.get_repository_name() or "Unknown Repository"
+            severity = finding.get_severity().upper() if finding.get_severity() else 'INFO'
+            
+            if repo not in repo_severity_counts:
+                repo_severity_counts[repo] = {
+                    'CRITICAL': 0,
+                    'HIGH': 0,
+                    'MEDIUM': 0,
+                    'LOW': 0
+                }
+            
+            if severity in repo_severity_counts[repo]:
+                repo_severity_counts[repo][severity] += 1
+
+        # Add table header
+        pdf.ln(10)
+        pdf.set_font(font_family, 'B', 12)
+        pdf.cell(0, 10, "Open Findings by Repository and Severity", ln=True)
+        pdf.ln(5)
+
+        # Define column widths (total = 190)
+        col_widths = {
+            'repo': 70,
+            'critical': 30,
+            'high': 30,
+            'medium': 30,
+            'low': 30
+        }
+
+        # Add table headers
+        pdf.set_font(font_family, 'B', 9)
+        pdf.set_fill_color(240, 240, 240)  # Light gray background
+        
+        # Header row
+        pdf.cell(col_widths['repo'], 8, "Repository", 1, 0, 'L', True)
+        pdf.cell(col_widths['critical'], 8, "Critical", 1, 0, 'C', True)
+        pdf.cell(col_widths['high'], 8, "High", 1, 0, 'C', True)
+        pdf.cell(col_widths['medium'], 8, "Medium", 1, 0, 'C', True)
+        pdf.cell(col_widths['low'], 8, "Low", 1, 1, 'C', True)
+
+        # Add data rows
+        pdf.set_font(font_family, '', 9)
+        for repo, counts in repo_severity_counts.items():
+            # Repository name might be long, so we'll handle wrapping
+            repo_name = repo
+            if len(repo_name) > 40:  # Truncate long names
+                repo_name = repo_name[:37] + "..."
+            
+            pdf.cell(col_widths['repo'], 8, repo_name, 1, 0, 'L')
+            pdf.cell(col_widths['critical'], 8, str(counts['CRITICAL']), 1, 0, 'C')
+            pdf.cell(col_widths['high'], 8, str(counts['HIGH']), 1, 0, 'C')
+            pdf.cell(col_widths['medium'], 8, str(counts['MEDIUM']), 1, 0, 'C')
+            pdf.cell(col_widths['low'], 8, str(counts['LOW']), 1, 1, 'C')
+
+        pdf.ln(10)
 
     def _generate_pdf_report(self, findings: List[Finding]) -> None:
         """Generate PDF report with charts and formatted findings."""
@@ -243,174 +320,245 @@ class ReportGenerator:
             generation_date = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
             pdf.cell(0, 10, sanitize_text(f"Generated on: {generation_date}"), ln=True)
 
+            # Add severity summary table
+            if findings:
+                self._add_severity_summary_table(pdf, findings, font_family)
+
             # Add severity distribution chart if enabled
             if self.config.include_charts and findings:
                 logger.debug("Adding charts to PDF")
                 self._add_charts_to_pdf(pdf, findings)
 
-            # Add findings table
-            pdf.add_page()
-            pdf.set_font(font_family, 'B', 12)
-            pdf.cell(0, 10, sanitize_text("Detailed Findings"), ln=True)
-            
             if not findings:
                 logger.debug("No findings to display in PDF")
                 pdf.set_font(font_family, '', 10)
                 pdf.cell(0, 10, sanitize_text("No security findings were identified."), ln=True)
             else:
-                pdf.set_font(font_family, '', 10)
+                # Group findings by repository
+                findings_by_repo = {}
                 for finding in findings:
-                    finding_dict = self._finding_to_dict(finding)
+                    repo = finding.get_repository_name() or "Unknown Repository"
+                    if repo not in findings_by_repo:
+                        findings_by_repo[repo] = []
+                    findings_by_repo[repo].append(finding)
+
+                # Process each repository's findings
+                for repo_name, repo_findings in findings_by_repo.items():
+                    pdf.add_page()
                     
-                    # Basic finding information
+                    # Repository header
+                    pdf.set_font(font_family, 'B', 14)
+                    pdf.cell(0, 10, sanitize_text(f"Repository: {repo_name}"), ln=True)
+                    
+                    # Calculate severity counts for this repository
+                    severity_counts = {
+                        'CRITICAL': 0,
+                        'HIGH': 0,
+                        'MEDIUM': 0,
+                        'LOW': 0,
+                        'INFO': 0
+                    }
+                    
+                    for finding in repo_findings:
+                        severity = finding.get_severity().upper() if finding.get_severity() else 'INFO'
+                        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+                    
+                    # Display severity summary for this repository
                     pdf.set_font(font_family, 'B', 10)
-                    pdf.cell(0, 10, sanitize_text(f"Finding: {finding_dict['check_id']}"), ln=True)
-                    
-                    pdf.set_font(font_family, '', 9)
-                    pdf.multi_cell(0, 5, sanitize_text(
-                        f"Severity: {finding_dict['severity'].upper() if finding_dict['severity'] else 'Unknown'}\n"
-                        f"Status: {finding_dict['status'] or 'N/A'}\n"
-                        f"State: {finding_dict['state'] or 'N/A'}\n"
-                        f"Triage State: {finding_dict['triage_state'] or 'N/A'}\n"
-                        f"File: {finding_dict['path']}:{finding_dict['line']}\n"
-                    ), border=0)
-                    
-                    # Add SCA information if this is a dependency finding
-                    if finding_dict['is_dependency']:
-                        pdf.ln(2)
-                        pdf.set_font(font_family, 'B', 9)
-                        pdf.cell(0, 5, sanitize_text("Dependency Information:"), ln=True)
-                        pdf.set_font(font_family, '', 9)
-                        
-                        sca_info = ""
-                        if finding_dict['dependency_name']:
-                            sca_info += f"Package: {finding_dict['dependency_name']}\n"
-                        if finding_dict['dependency_version']:
-                            sca_info += f"Version: {finding_dict['dependency_version']}\n"
-                        if finding_dict['fixed_version']:
-                            sca_info += f"Fixed in Version: {finding_dict['fixed_version']}\n"
-                        if finding_dict['ecosystem']:
-                            sca_info += f"Ecosystem: {finding_dict['ecosystem']}\n"
-                        if finding_dict['cve_ids']:
-                            sca_info += f"CVE IDs: {', '.join(finding_dict['cve_ids'])}\n"
-                        if finding_dict['reachable'] is not None:
-                            sca_info += f"Reachable: {'Yes' if finding_dict['reachable'] else 'No'}\n"
-                        if finding_dict['reachability_details']:
-                            sca_info += f"Reachability Details: {finding_dict['reachability_details']}\n"
-                        if finding_dict['references']:
-                            sca_info += f"References:\n"
-                            for ref in finding_dict['references']:
-                                sca_info += f"  - {ref}\n"
-                        
-                        pdf.multi_cell(0, 5, sanitize_text(sca_info), border=0)
-                    
-                    # Add triage information if available
-                    if any([finding_dict['triaged_at'], finding_dict['triage_comment'], finding_dict['triage_reason'], finding_dict['state_updated_at']]):
-                        pdf.ln(2)
-                        pdf.set_font(font_family, 'B', 9)
-                        pdf.cell(0, 5, sanitize_text("Triage Information:"), ln=True)
-                        pdf.set_font(font_family, '', 9)
-                        
-                        triage_info = ""
-                        if finding_dict['triaged_at']:
-                            triage_info += f"Triaged on: {finding_dict['triaged_at']}\n"
-                        if finding_dict['triage_reason']:
-                            triage_info += f"Triage Reason: {finding_dict['triage_reason']}\n"
-                        if finding_dict['triage_comment']:
-                            triage_info += f"Comment: {finding_dict['triage_comment']}\n"
-                        if finding_dict['state_updated_at']:
-                            triage_info += f"State Last Updated: {finding_dict['state_updated_at']}\n"
-                        
-                        pdf.multi_cell(0, 5, sanitize_text(triage_info), border=0)
-                    
-                    # Link to code if available
-                    if finding_dict['line_of_code_url']:
-                        pdf.set_text_color(0, 0, 255)  # Blue for links
-                        pdf.cell(0, 5, sanitize_text("View in repository"), ln=True)
-                        pdf.set_text_color(0, 0, 0)  # Reset to black
-                    
-                    # Message/Description
-                    pdf.set_font(font_family, 'B', 9)
-                    pdf.cell(0, 5, sanitize_text("Description:"), ln=True)
+                    pdf.cell(0, 8, sanitize_text("Severity Summary:"), ln=True)
                     pdf.set_font(font_family, '', 9)
                     
-                    # Make sure message is not None before using it
-                    message = finding_dict.get('message', '')
-                    if message:
-                        pdf.multi_cell(0, 5, sanitize_text(message), border=0)
-                    else:
-                        pdf.multi_cell(0, 5, sanitize_text("No description available"), border=0)
+                    # Display counts with color-coded severity
+                    for severity, count in severity_counts.items():
+                        if count > 0:  # Only show severities that have findings
+                            # Set color based on severity
+                            if severity == 'CRITICAL':
+                                pdf.set_text_color(139, 0, 0)  # Dark Red
+                            elif severity == 'HIGH':
+                                pdf.set_text_color(255, 0, 0)  # Red
+                            elif severity == 'MEDIUM':
+                                pdf.set_text_color(255, 140, 0)  # Orange
+                            elif severity == 'LOW':
+                                pdf.set_text_color(0, 128, 0)  # Green
+                            else:
+                                pdf.set_text_color(128, 128, 128)  # Gray
+                            
+                            pdf.cell(0, 5, sanitize_text(f"{severity}: {count} findings"), ln=True)
                     
-                    # Rule details if available
-                    if finding.rule:
-                        pdf.ln(2)
-                        pdf.set_font(font_family, 'B', 9)
-                        pdf.cell(0, 5, sanitize_text("Rule Details:"), ln=True)
+                    # Reset text color to black
+                    pdf.set_text_color(0, 0, 0)
+                    
+                    # Add a separator line
+                    pdf.ln(5)
+                    pdf.cell(0, 0, "", ln=True, border="T")
+                    pdf.ln(5)
+                    
+                    # Display detailed findings for this repository
+                    pdf.set_font(font_family, 'B', 12)
+                    pdf.cell(0, 10, sanitize_text("Detailed Findings"), ln=True)
+                    
+                    pdf.set_font(font_family, '', 10)
+                    for finding in repo_findings:
+                        finding_dict = self._finding_to_dict(finding)
+                        
+                        # Basic finding information
+                        pdf.set_font(font_family, 'B', 10)
+                        pdf.cell(0, 10, sanitize_text(f"Finding: {finding_dict['check_id']}"), ln=True)
+                        
                         pdf.set_font(font_family, '', 9)
+                        pdf.multi_cell(0, 5, sanitize_text(
+                            f"Severity: {finding_dict['severity'].upper() if finding_dict['severity'] else 'Unknown'}\n"
+                            f"Status: {finding_dict['status'] or 'N/A'}\n"
+                            f"State: {finding_dict['state'] or 'N/A'}\n"
+                            f"Triage State: {finding_dict['triage_state'] or 'N/A'}\n"
+                            f"File: {finding_dict['path']}:{finding_dict['line']}\n"
+                        ), border=0)
                         
-                        # Build rule details text
-                        rule_details = ""
-                        if finding.rule.category:
-                            rule_details += f"Category: {finding.rule.category}\n"
-                        
-                        if finding.rule.subcategories:
-                            rule_details += f"Subcategories: {', '.join(finding.rule.subcategories)}\n"
-                        
-                        if finding.rule.vulnerability_classes:
-                            rule_details += f"Vulnerability Classes: {', '.join(finding.rule.vulnerability_classes)}\n"
-                        
-                        if finding.rule.cwe_names:
-                            rule_details += f"CWE: {', '.join(finding.rule.cwe_names)}\n"
-                        
-                        if finding.rule.owasp_names:
-                            rule_details += f"OWASP: {', '.join(finding.rule.owasp_names)}\n"
-                        
-                        if rule_details:
-                            pdf.multi_cell(0, 5, sanitize_text(rule_details), border=0)
-                        else:
-                            pdf.multi_cell(0, 5, sanitize_text("No additional rule details available"), border=0)
-                    
-                    # Assistant guidance if available
-                    if finding.assistant and hasattr(finding.assistant, 'guidance') and finding.assistant.guidance:
-                        guidance_summary = getattr(finding.assistant.guidance, 'summary', None)
-                        guidance_instructions = getattr(finding.assistant.guidance, 'instructions', None)
-                        
-                        if guidance_summary or guidance_instructions:
+                        # Add SCA information if this is a dependency finding
+                        if finding_dict['is_dependency']:
                             pdf.ln(2)
                             pdf.set_font(font_family, 'B', 9)
-                            pdf.cell(0, 5, sanitize_text("Remediation Guidance:"), ln=True)
+                            pdf.cell(0, 5, sanitize_text("Dependency Information:"), ln=True)
                             pdf.set_font(font_family, '', 9)
                             
-                            if guidance_summary:
-                                pdf.multi_cell(0, 5, sanitize_text(f"Summary: {guidance_summary}"), border=0)
+                            sca_info = ""
+                            if finding_dict['dependency_name']:
+                                sca_info += f"Package: {finding_dict['dependency_name']}\n"
+                            if finding_dict['dependency_version']:
+                                sca_info += f"Version: {finding_dict['dependency_version']}\n"
+                            if finding_dict['fixed_version']:
+                                sca_info += f"Fixed in Version: {finding_dict['fixed_version']}\n"
+                            if finding_dict['ecosystem']:
+                                sca_info += f"Ecosystem: {finding_dict['ecosystem']}\n"
+                            if finding_dict['cve_ids']:
+                                sca_info += f"CVE IDs: {', '.join(finding_dict['cve_ids'])}\n"
+                            if finding_dict['reachable'] is not None:
+                                sca_info += f"Reachable: {'Yes' if finding_dict['reachable'] else 'No'}\n"
+                            if finding_dict['reachability_details']:
+                                sca_info += f"Reachability Details: {finding_dict['reachability_details']}\n"
+                            if finding_dict['references']:
+                                sca_info += f"References:\n"
+                                for ref in finding_dict['references']:
+                                    sca_info += f"  - {ref}\n"
                             
-                            if guidance_instructions:
-                                pdf.ln(1)
-                                pdf.set_font(font_family, 'I', 8)
-                                pdf.multi_cell(0, 4, sanitize_text(guidance_instructions), border=0)
-                    
-                    # Autofix if available  
-                    if finding.assistant and hasattr(finding.assistant, 'autofix') and finding.assistant.autofix:
-                        fix_code = getattr(finding.assistant.autofix, 'fix_code', None)
-                        explanation = getattr(finding.assistant.autofix, 'explanation', None)
+                            pdf.multi_cell(0, 5, sanitize_text(sca_info), border=0)
                         
-                        if fix_code:
+                        # Add triage information if available
+                        if any([finding_dict['triaged_at'], finding_dict['triage_comment'], finding_dict['triage_reason'], finding_dict['state_updated_at']]):
                             pdf.ln(2)
                             pdf.set_font(font_family, 'B', 9)
-                            pdf.cell(0, 5, sanitize_text("Suggested Fix:"), ln=True)
+                            pdf.cell(0, 5, sanitize_text("Triage Information:"), ln=True)
+                            pdf.set_font(font_family, '', 9)
                             
-                            # Use the same font for code (no Courier in many Unicode fonts)
-                            pdf.set_font(font_family, '', 8)  # Smaller size for code
-                            pdf.multi_cell(0, 4, sanitize_text(fix_code), border=0)
+                            triage_info = ""
+                            if finding_dict['triaged_at']:
+                                triage_info += f"Triaged on: {finding_dict['triaged_at']}\n"
+                            if finding_dict['triage_reason']:
+                                triage_info += f"Triage Reason: {finding_dict['triage_reason']}\n"
+                            if finding_dict['triage_comment']:
+                                triage_info += f"Comment: {finding_dict['triage_comment']}\n"
+                            if finding_dict['state_updated_at']:
+                                triage_info += f"State Last Updated: {finding_dict['state_updated_at']}\n"
                             
-                            if explanation:
-                                pdf.set_font(font_family, 'I', 8)
-                                pdf.multi_cell(0, 4, sanitize_text(f"Note: {explanation}"), border=0)
-                    
-                    # Add separator between findings
-                    pdf.ln(5)
-                    pdf.cell(0, 0, "", ln=True, border="T")  # Horizontal line
-                    pdf.ln(5)
+                            pdf.multi_cell(0, 5, sanitize_text(triage_info), border=0)
+                        
+                        # Link to code if available
+                        if finding_dict['line_of_code_url']:
+                            pdf.set_text_color(0, 0, 255)  # Blue for links
+                            pdf.set_font(font_family, 'U', 9)  # Underlined text for links
+                            pdf.cell(0, 5, sanitize_text("View in repository"), link=finding_dict['line_of_code_url'])
+                            pdf.ln()
+                            
+                            # Add Semgrep UI link if available
+                            if finding_dict['semgrep_ui_url']:
+                                pdf.cell(0, 5, sanitize_text("View in Semgrep UI"), link=finding_dict['semgrep_ui_url'])
+                                pdf.ln()
+                            
+                            pdf.set_font(font_family, '', 9)  # Reset font
+                            pdf.set_text_color(0, 0, 0)  # Reset to black
+                        
+                        # Message/Description
+                        pdf.set_font(font_family, 'B', 9)
+                        pdf.cell(0, 5, sanitize_text("Description:"), ln=True)
+                        pdf.set_font(font_family, '', 9)
+                        
+                        # Make sure message is not None before using it
+                        message = finding_dict.get('message', '')
+                        if message:
+                            pdf.multi_cell(0, 5, sanitize_text(message), border=0)
+                        else:
+                            pdf.multi_cell(0, 5, sanitize_text("No description available"), border=0)
+                        
+                        # Rule details if available
+                        if finding.rule:
+                            pdf.ln(2)
+                            pdf.set_font(font_family, 'B', 9)
+                            pdf.cell(0, 5, sanitize_text("Rule Details:"), ln=True)
+                            pdf.set_font(font_family, '', 9)
+                            
+                            # Build rule details text
+                            rule_details = ""
+                            if finding.rule.category:
+                                rule_details += f"Category: {finding.rule.category}\n"
+                            
+                            if finding.rule.subcategories:
+                                rule_details += f"Subcategories: {', '.join(finding.rule.subcategories)}\n"
+                            
+                            if finding.rule.vulnerability_classes:
+                                rule_details += f"Vulnerability Classes: {', '.join(finding.rule.vulnerability_classes)}\n"
+                            
+                            if finding.rule.cwe_names:
+                                rule_details += f"CWE: {', '.join(finding.rule.cwe_names)}\n"
+                            
+                            if finding.rule.owasp_names:
+                                rule_details += f"OWASP: {', '.join(finding.rule.owasp_names)}\n"
+                            
+                            if rule_details:
+                                pdf.multi_cell(0, 5, sanitize_text(rule_details), border=0)
+                            else:
+                                pdf.multi_cell(0, 5, sanitize_text("No additional rule details available"), border=0)
+                        
+                        # Assistant guidance if available
+                        if finding.assistant and hasattr(finding.assistant, 'guidance') and finding.assistant.guidance:
+                            guidance_summary = getattr(finding.assistant.guidance, 'summary', None)
+                            guidance_instructions = getattr(finding.assistant.guidance, 'instructions', None)
+                            
+                            if guidance_summary or guidance_instructions:
+                                pdf.ln(2)
+                                pdf.set_font(font_family, 'B', 9)
+                                pdf.cell(0, 5, sanitize_text("Remediation Guidance:"), ln=True)
+                                pdf.set_font(font_family, '', 9)
+                                
+                                if guidance_summary:
+                                    pdf.multi_cell(0, 5, sanitize_text(f"Summary: {guidance_summary}"), border=0)
+                                
+                                if guidance_instructions:
+                                    pdf.ln(1)
+                                    pdf.set_font(font_family, 'I', 8)
+                                    pdf.multi_cell(0, 4, sanitize_text(guidance_instructions), border=0)
+                        
+                        # Autofix if available  
+                        if finding.assistant and hasattr(finding.assistant, 'autofix') and finding.assistant.autofix:
+                            fix_code = getattr(finding.assistant.autofix, 'fix_code', None)
+                            explanation = getattr(finding.assistant.autofix, 'explanation', None)
+                            
+                            if fix_code:
+                                pdf.ln(2)
+                                pdf.set_font(font_family, 'B', 9)
+                                pdf.cell(0, 5, sanitize_text("Suggested Fix:"), ln=True)
+                                
+                                # Use the same font for code (no Courier in many Unicode fonts)
+                                pdf.set_font(font_family, '', 8)  # Smaller size for code
+                                pdf.multi_cell(0, 4, sanitize_text(fix_code), border=0)
+                                
+                                if explanation:
+                                    pdf.set_font(font_family, 'I', 8)
+                                    pdf.multi_cell(0, 4, sanitize_text(f"Note: {explanation}"), border=0)
+                        
+                        # Add separator between findings
+                        pdf.ln(5)
+                        pdf.cell(0, 0, "", ln=True, border="T")  # Horizontal line
+                        pdf.ln(5)
 
             output_path = self.output_dir / "semgrep_report.pdf"
             pdf.output(str(output_path))
@@ -454,9 +602,14 @@ class ReportGenerator:
             fig.write_image(str(chart_path))
             logger.debug(f"Chart saved to {chart_path}")
             
-            # Add chart to PDF
-            pdf.image(str(chart_path), x=10, y=pdf.get_y() + 10, w=190)
-            pdf.ln(100)  # Space for the chart
+            # Always start charts on a new page
+            pdf.add_page()
+            
+            # Add chart to PDF - centered on the page
+            page_width = pdf.w
+            chart_width = 190  # Width of the chart in mm
+            x_position = (page_width - chart_width) / 2  # Center horizontally
+            pdf.image(str(chart_path), x=x_position, y=30, w=chart_width)  # Fixed y position from top
             
             # Clean up temporary chart file
             chart_path.unlink(missing_ok=True)
@@ -477,11 +630,14 @@ class ReportGenerator:
                 # Basic finding information
                 "check_id", "path", "line", "message", "severity", "repository",
                 
+                # Links and IDs
+                "finding_id", "line_of_code_url", "semgrep_ui_url",
+                
                 # Triage fields
                 "state", "status", "triage_state", "triaged_at", "state_updated_at", "triage_comment", "triage_reason",
                 
                 # Optional fields
-                "commit", "scan_date", "line_of_code_url",
+                "commit", "scan_date",
                 
                 # SCA-specific fields
                 "is_dependency", "dependency_name", "dependency_version", "fixed_version", "ecosystem", "cve_ids", "references", "reachable", "reachability_details",
@@ -534,11 +690,14 @@ class ReportGenerator:
                 # Basic finding information
                 "check_id", "path", "line", "message", "severity", "repository",
                 
+                # Links and IDs
+                "finding_id", "line_of_code_url", "semgrep_ui_url",
+                
                 # Triage fields
                 "state", "status", "triage_state", "state_updated_at", "triage_comment", "triage_reason",
                 
                 # Optional fields
-                "commit", "scan_date", "line_of_code_url",
+                "commit", "scan_date",
                 
                 # SCA-specific fields
                 "is_dependency", "dependency_name", "dependency_version", "fixed_version", "ecosystem", "cve_ids", "references", "reachable", "reachability_details",
@@ -563,24 +722,61 @@ class ReportGenerator:
             output_path = self.output_dir / "semgrep_findings.xlsx"
             
             with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+                # Create severity summary by repository
+                if not df.empty:
+                    summary_data = []
+                    for repo in df['repository'].unique():
+                        repo_findings = df[df['repository'] == repo]
+                        severity_counts = {
+                            'Repository': repo,
+                            'Critical': len(repo_findings[repo_findings['severity'].str.upper() == 'CRITICAL']),
+                            'High': len(repo_findings[repo_findings['severity'].str.upper() == 'HIGH']),
+                            'Medium': len(repo_findings[repo_findings['severity'].str.upper() == 'MEDIUM']),
+                            'Low': len(repo_findings[repo_findings['severity'].str.upper() == 'LOW'])
+                        }
+                        summary_data.append(severity_counts)
+                    
+                    summary_df = pd.DataFrame(summary_data)
+                else:
+                    summary_df = pd.DataFrame(columns=['Repository', 'Critical', 'High', 'Medium', 'Low'])
+
+                # Write the summary sheet first
+                summary_df.to_excel(writer, sheet_name="Open Findings by Repository", index=False)
+                
+                # Format the summary sheet
+                workbook = writer.book
+                summary_sheet = writer.sheets["Open Findings by Repository"]
+                
+                # Apply formatting to the summary sheet
+                for column in range(len(summary_df.columns)):
+                    max_length = 0
+                    column_letter = get_column_letter(column + 1)
+                    
+                    # Find the maximum length in the column
+                    for row in range(len(summary_df) + 1):  # +1 for header
+                        cell = summary_sheet[f"{column_letter}{row + 1}"]
+                        max_length = max(max_length, len(str(cell.value)))
+                    
+                    # Set the column width
+                    adjusted_width = (max_length + 2)
+                    summary_sheet.column_dimensions[column_letter].width = adjusted_width
+
+                # Write the detailed findings
                 if df.empty:
-                    # If empty, write a dummy dataframe with columns but no data
                     pd.DataFrame(columns=fieldnames).to_excel(writer, sheet_name="Findings", index=False)
                 else:
-                    # Only include columns that are in our fieldnames list and in the order specified
                     columns_to_include = [col for col in fieldnames if col in df.columns]
                     df = df[columns_to_include]
                     df.to_excel(writer, sheet_name="Findings", index=False)
                     
                     if self.config.include_charts:
-                        # Create pivot table for severity distribution
                         pivot = pd.pivot_table(
                             df,
                             values="severity",
                             index="severity",
                             aggfunc="count"
                         )
-                        pivot.to_excel(writer, sheet_name="Summary")
+                        pivot.to_excel(writer, sheet_name="Charts")
             
             logger.info(f"Excel report saved to {output_path}")
             

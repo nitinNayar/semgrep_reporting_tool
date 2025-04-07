@@ -5,7 +5,7 @@ Semgrep API client for fetching security findings.
 import json
 import logging
 import time
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -23,168 +23,134 @@ class SemgrepClient:
     """Client for interacting with the Semgrep API."""
 
     def __init__(self, config: APIConfig):
+        """Initialize the Semgrep API client."""
         self.config = config
+        self.base_url = config.api_url
         
-        # Configure session with retries and timeouts
-        self.session = requests.Session()
-        
-        # Configure retries for connection errors
+        # Set up session with retries
         retry_strategy = Retry(
-            total=3,  # Maximum number of retries
-            backoff_factor=1,  # Time factor between retries
-            status_forcelist=[429, 500, 502, 503, 504],  # Retry on these HTTP status codes
-            allowed_methods=["GET"]  # Only retry on GET requests
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
         )
-        
         adapter = HTTPAdapter(max_retries=retry_strategy)
+        
+        self.session = requests.Session()
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
         
         # Set headers
         self.session.headers.update({
-            "Authorization": f"Bearer {config.api_token}",
+            "Authorization": f"Bearer {config.token}",
             "Accept": "application/json",
             "User-Agent": "semgrep-reporter/0.1.0"
         })
 
     def get_findings(
         self,
+        issue_type: str = "sast",
         repositories: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
         severity_levels: Optional[List[str]] = None,
-        finding_types: Optional[List[str]] = None,
-        progress: Optional[Progress] = None,
-        progress_task: Optional[Any] = None
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        console: Optional[Console] = None
     ) -> List[Finding]:
         """
-        Fetch findings from Semgrep API with optional filtering.
-
+        Get list of findings from Semgrep.
+        
         Args:
+            issue_type: Type of findings to fetch ("sast" or "sca")
             repositories: Optional list of repository names to filter by
             tags: Optional list of repository tags to filter by
             severity_levels: Optional list of severity levels to filter by
-            finding_types: Optional list of finding types to filter by ('sast', 'sca')
-            progress: Optional Progress instance for progress tracking
-            progress_task: Optional task ID for the progress bar
-
+            progress_callback: Optional callback function to report progress
+            console: Optional console for output logging
+            
         Returns:
             List of Finding objects
         """
-        # Base parameters for filtering
-        params: Dict[str, Any] = {}
-        if repositories:
-            params["repos"] = ",".join(repositories)
-        if tags:
-            params["tags"] = ",".join(tags)
-        if severity_levels:
-            params["severity"] = ",".join(severity_levels)
-        if finding_types:
-            params["issue_type"] = ",".join(finding_types)
-        else:
-            params["issue_type"] = "sast"  # Default to SAST if not specified
-            
-        # Build the API URL - make sure deployment_slug is correctly formatted
-        api_url = f"{self.config.api_url}/findings"
+        # Use provided console or create a new one
+        output_console = console or Console()
+        
+        # Build the API URL
+        api_url = f"{self.base_url}/findings"
         if self.config.deployment_slug:
-            api_url = f"{self.config.api_url}/deployments/{self.config.deployment_slug}/findings"
-            
+            api_url = f"{self.base_url}/deployments/{self.config.deployment_slug}/findings"
+        
         # Log initial API request details
-        console = Console()
-        console.print("\n[bold blue]API Request Details:[/bold blue]")
-        console.print(f"[yellow]Endpoint:[/yellow] {api_url}")
-        console.print("[yellow]Base Parameters:[/yellow]")
+        output_console.print("\n[bold blue]API Request Details:[/bold blue]")
+        output_console.print(f"[yellow]Endpoint:[/yellow] {api_url}")
+        
+        # Build query parameters
+        params = {
+            "issue_type": issue_type
+        }
+        
+        if repositories:
+            params["repos"] = repositories
+        if tags:
+            params["tags"] = tags
+        if severity_levels:
+            params["severity"] = severity_levels
+            
+        # Log base parameters
+        output_console.print("[yellow]Base Parameters:[/yellow]")
         for key, value in params.items():
-            console.print(f"  • {key}: {value}")
-
-        # Initialize findings list and pagination variables
-        all_findings: List[Finding] = []
-        current_page = 0
-        page_size = 100  # Default page size per Semgrep API docs
-        total_findings = 0
-        has_more = True
-
-        while has_more:
+            output_console.print(f"  • {key}: {value}")
+            
+        # Initialize pagination parameters
+        page = 0
+        page_size = 100
+        total_findings = []
+        total_count = None
+        
+        while True:
             # Add pagination parameters
-            pagination_params = params.copy()
-            pagination_params["page"] = current_page
-            pagination_params["page_size"] = page_size
+            params.update({
+                "page": page,
+                "page_size": page_size
+            })
             
-            # Log pagination details
-            logger.debug(f"Fetching page {current_page} with page_size {page_size}")
-            logger.debug(f"Full parameters: {pagination_params}")
+            # Make the API request
+            response = self.session.get(api_url, params=params)
+            response.raise_for_status()
+            data = response.json()
             
-            try:
-                # Make API request with parameters
-                response = self.session.get(
-                    api_url,
-                    params=pagination_params,
-                    timeout=30,
-                )
-                response.raise_for_status()
-                
-                # Parse response
-                data = response.json()
-                
-                # Get findings from this page
-                page_findings = data.get("findings", [])
-                finding_count = len(page_findings)
-                
-                # Update progress
-                if current_page == 0:
-                    # Get total count if available
-                    if "total" in data:
-                        total_findings = data["total"]
-                        if progress and progress_task:
-                            progress.update(progress_task, total=total_findings)
-                        console.print(f"\n[blue]Total findings available: {total_findings}[/blue]")
-                
-                # Create Finding objects
-                for finding_data in page_findings:
-                    try:
-                        finding = Finding(**finding_data)
-                        all_findings.append(finding)
-                    except ValidationError as e:
-                        logger.warning(f"Failed to parse finding: {e}")
-                        continue
-                
-                # Update progress
-                if progress and progress_task:
-                    progress.update(progress_task, completed=len(all_findings))
-                
-                # Log progress
-                console.print(f"[green]Retrieved {finding_count} findings from page {current_page}[/green]")
-                
-                # Check if we should continue pagination
-                # We have a full page of results, so there might be more
-                has_more = finding_count >= page_size
-                
-                # If we have a total count, use it to determine if we should continue
-                if "total" in data:
-                    has_more = len(all_findings) < data["total"]
-                
-                # Increment page counter if we need to continue
-                if has_more:
-                    current_page += 1
-                    # Add a small delay between requests to avoid rate limiting
-                    time.sleep(0.5)
-                
-            except requests.exceptions.RequestException as e:
-                logger.error(f"API request failed on page {current_page}: {e}")
-                if hasattr(e.response, 'text'):
-                    logger.error(f"Response text: {e.response.text}")
-                raise
+            # Get the findings from this page
+            findings = data.get("findings", [])
+            total_findings.extend(findings)
+            
+            # Get total count if not already set
+            if total_count is None:
+                total_count = data.get("total_count", len(findings))
+                output_console.print(f"\n[blue]Total findings available: {total_count}[/blue]")
+            
+            # Log progress
+            output_console.print(f"[green]Retrieved {len(findings)} findings from page {page}[/green]")
+            
+            # Update progress if callback provided
+            if progress_callback:
+                progress_callback(len(total_findings), total_count)
+            
+            # Check if we need to fetch more pages
+            if len(findings) < page_size:
+                break
+            
+            # Add a small delay between requests to avoid rate limiting
+            time.sleep(0.5)
+            page += 1
         
-        # Final summary
-        console.print(f"\n[bold green]Successfully retrieved {len(all_findings)} total findings across {current_page + 1} pages[/bold green]")
+        output_console.print(f"\n[bold green]Successfully retrieved {len(total_findings)} total findings across {page + 1} pages[/bold green]")
         
-        return all_findings
+        # Convert raw findings to Finding objects
+        return [Finding(**finding) for finding in total_findings]
 
     def get_repositories(self) -> List[str]:
         """Get list of available repositories."""
         # Build the API URL
-        api_url = f"{self.config.api_url}/repos"
+        api_url = f"{self.base_url}/repos"
         if self.config.deployment_slug:
-            api_url = f"{self.config.api_url}/deployments/{self.config.deployment_slug}/repos"
+            api_url = f"{self.base_url}/deployments/{self.config.deployment_slug}/repos"
         
         logger.debug(f"Fetching repositories from: {api_url}")
         
@@ -216,7 +182,7 @@ class SemgrepClient:
                 if (hasattr(e, 'response') and e.response and e.response.status_code == 400 and 
                     self.config.deployment_slug and current_url == api_url):
                     logger.warning("Got 400 error with deployment slug URL. Trying fallback to base API URL")
-                    current_url = f"{self.config.api_url}/repos"
+                    current_url = f"{self.base_url}/repos"
                     # Reset retry count for the new URL
                     attempt = -1  # Will become 0 after increment
                     retry_delay = 2
@@ -242,9 +208,9 @@ class SemgrepClient:
     def get_repository_tags(self) -> List[str]:
         """Get list of available repository tags."""
         # Build the API URL
-        api_url = f"{self.config.api_url}/tags"
+        api_url = f"{self.base_url}/tags"
         if self.config.deployment_slug:
-            api_url = f"{self.config.api_url}/deployments/{self.config.deployment_slug}/tags"
+            api_url = f"{self.base_url}/deployments/{self.config.deployment_slug}/tags"
         
         logger.debug(f"Fetching repository tags from: {api_url}")
         
@@ -276,6 +242,7 @@ class SemgrepClient:
                 if (hasattr(e, 'response') and e.response and e.response.status_code == 400 and 
                     self.config.deployment_slug and current_url == api_url):
                     logger.warning("Got 400 error with deployment slug URL. Trying fallback to base API URL")
+                    current_url = f"{self.base_url}/tags"
                     current_url = f"{self.config.api_url}/tags"
                     # Reset retry count for the new URL
                     attempt = -1  # Will become 0 after increment

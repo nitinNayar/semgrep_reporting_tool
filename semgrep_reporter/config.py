@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings
 
 class APIConfig(BaseModel):
     """Semgrep API configuration."""
-    api_token: str = Field(..., description="Semgrep API token")
+    token: str = Field(..., description="Semgrep API token")
     deployment_slug: str = Field(..., description="Semgrep deployment slug")
     api_url: str = Field(
         "https://semgrep.dev/api/v1",
@@ -36,6 +36,10 @@ class ReportConfig(BaseModel):
     report_title: str = Field(
         "Semgrep Security Findings Report",
         description="Title for the generated reports"
+    )
+    deployment_slug: Optional[str] = Field(
+        None,
+        description="Semgrep deployment slug for generating UI links"
     )
 
 
