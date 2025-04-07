@@ -44,8 +44,6 @@ htmlcov/
 test_pdf.py
 
 # Semgrep Reporter specific
-reports/
-**/reports/
 **/sast/
 **/sca/
 semgrep_raw_findings.json
