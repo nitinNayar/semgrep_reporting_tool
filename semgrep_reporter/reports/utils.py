@@ -46,7 +46,22 @@ class FindingFormatter:
             
             # Initialize Semgrep UI fields
             "finding_id": None,
-            "semgrep_ui_url": None
+            "semgrep_ui_url": None,
+            
+            # Initialize vulnerability classification fields
+            "vulnerability_classes": [],
+            "cwe_names": [],
+            "owasp_names": [],
+            
+            # Initialize AI fields with defaults
+            "guidance_summary": None,
+            "guidance_instructions": None,
+            "autofix_code": None,
+            "autofix_explanation": None,
+            "autotriage_verdict": None,
+            "autotriage_reason": None,
+            "component_tag": None,
+            "component_risk": None
         }
 
         # Add Semgrep UI link if raw_response is available
@@ -66,14 +81,7 @@ class FindingFormatter:
             "cve_ids": getattr(finding, 'cve_ids', []),
             "references": getattr(finding, 'references', []),
             "reachable": getattr(finding, 'reachable', None),
-            "reachability_details": getattr(finding, 'reachability_details', None),
-            
-            # Rule fields
-            "rule_category": "",
-            "rule_subcategories": [],
-            "vulnerability_classes": [],
-            "cwe_names": [],
-            "owasp_names": []
+            "reachability_details": getattr(finding, 'reachability_details', None)
         })
         
         # Add rule information if available
@@ -81,9 +89,9 @@ class FindingFormatter:
             finding_dict.update({
                 "rule_category": finding.rule.category,
                 "rule_subcategories": finding.rule.subcategories,
-                "vulnerability_classes": finding.rule.vulnerability_classes,
-                "cwe_names": finding.rule.cwe_names,
-                "owasp_names": finding.rule.owasp_names
+                "vulnerability_classes": finding.rule.vulnerability_classes or [],
+                "cwe_names": finding.rule.cwe_names or [],
+                "owasp_names": finding.rule.owasp_names or []
             })
             
         # Add assistant information if available
@@ -107,40 +115,63 @@ class FindingFormatter:
         return finding_dict
 
 class TextSanitizer:
-    """Handles text sanitization for different report formats."""
+    """Utility class for sanitizing text for different output formats."""
     
     @staticmethod
-    def sanitize_for_pdf(text: Optional[str]) -> str:
-        """Sanitize text for PDF output, handling Unicode characters."""
+    def sanitize_for_pdf(text: str) -> str:
+        """
+        Sanitize text for PDF output, replacing problematic characters.
+        
+        Args:
+            text: The text to sanitize
+            
+        Returns:
+            Sanitized text safe for PDF output
+        """
         if not text:
             return ""
             
-        # Replace smart quotes and other problematic characters
-        replacements = {
+        # Map of Unicode characters to their ASCII/Latin-1 equivalents
+        char_map = {
             '\u2018': "'",  # Left single quote
             '\u2019': "'",  # Right single quote
-            '\u201c': '"',  # Left double quote
-            '\u201d': '"',  # Right double quote
+            '\u201C': '"',  # Left double quote
+            '\u201D': '"',  # Right double quote
             '\u2013': '-',  # En dash
             '\u2014': '--', # Em dash
-            '\u00a0': ' ',  # Non-breaking space
-            '\u2022': '*',  # Bullet
-            '\u2026': '...', # Ellipsis
-            '\u2032': "'",  # Prime
-            '\u2033': '"',  # Double prime
+            '\u2026': '...',# Ellipsis
+            '\u00A0': ' ',  # Non-breaking space
+            '\u200B': '',   # Zero-width space
+            '\u200C': '',   # Zero-width non-joiner
+            '\u200D': '',   # Zero-width joiner
+            '\u2022': '*',  # Bullet point
+            '\u2032': "'",  # Prime (for feet, minutes)
+            '\u2033': '"',  # Double prime (for inches, seconds)
+            '\u2212': '-',  # Minus sign
+            '\u00D7': 'x',  # Multiplication sign
+            '\u200E': '',   # Left-to-right mark
+            '\u200F': '',   # Right-to-left mark
+            '\uFEFF': '',   # Byte order mark
         }
         
-        for char, replacement in replacements.items():
-            text = text.replace(char, replacement)
+        # Replace special characters
+        for unicode_char, ascii_char in char_map.items():
+            text = text.replace(unicode_char, ascii_char)
         
-        # Remove other non-Latin1 characters
+        # Replace any remaining non-Latin1 characters with their closest ASCII equivalent
+        # or remove them if no good equivalent exists
         result = ""
         for char in text:
-            if ord(char) < 256:  # Latin-1 range
+            try:
+                # Try to encode to Latin-1
+                char.encode('latin-1')
                 result += char
-            else:
-                result += '?'
-                
+            except UnicodeEncodeError:
+                # If can't encode, try to normalize to closest ASCII equivalent
+                import unicodedata
+                normalized = unicodedata.normalize('NFKD', char).encode('ASCII', 'ignore').decode('ASCII')
+                result += normalized if normalized else '_'
+        
         return result
 
 class ReportFields:
